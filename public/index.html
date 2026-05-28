@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Room-based Collaborative Canvas</title>
+    <style>
+        body { font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; background-color: #e9ecef; margin: 0; padding: 20px; height: 100vh; justify-content: center; }
+        .toolbar { background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; display: flex; gap: 15px; align-items: center; width: 860px;}
+        canvas { background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-radius: 4px; cursor: crosshair; touch-action: none; display: block; margin: 0 auto;}
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; transition: 0.2s; font-weight: bold;}
+        button:hover { background: #0056b3; }
+        .btn-danger { background: #dc3545;}
+        .btn-danger:hover { background: #c82333;}
+        input[type="color"] { border: none; border-radius: 4px; width: 40px; height: 40px; cursor: pointer; padding: 0; }
+        .status { position: fixed; top: 10px; right: 10px; padding: 5px 10px; background: rgba(0,0,0,0.7); color: white; border-radius: 4px; font-size: 0.8em; }
+        
+        #login-form { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; }
+        #login-form input { padding: 12px; margin: 10px 0 20px 0; border: 1px solid #ccc; border-radius: 4px; width: 250px; display: block;}
+        
+        #canvas-interface { display: none; width: 100%; text-align: center; margin-top: 20px;}
+        .room-title { margin-bottom: 10px; color: #333; }
+    </style>
+</head>
+<body>
+
+    <!-- Login Form -->
+    <div id="login-form">
+        <h2>🛠️ Join Canvas Room</h2>
+        <input type="text" id="room-input" placeholder="Enter Room Name" required onkeypress="if(event.key==='Enter') joinRoom()" />
+        <button onclick="joinRoom()">Enter Canvas Room</button>
+    </div>
+
+    <!-- Canvas Interface -->
+    <div id="canvas-interface">
+        <h2 class="room-title">Room: <span id="current-room-name" style="color: #007bff;"></span></h2>
+        
+        <div class="toolbar" style="margin: 0 auto 20px auto;">
+            <input type="color" id="color-picker" value="#000000" title="Choose color">
+            <button class="btn-danger" onclick="clearCanvas()">🗑️ Clear Canvas</button>
+            <button onclick="leaveRoom()" style="margin-left: auto;">🚪 Leave Room</button>
+        </div>
+        
+        <canvas id="whiteboard" width="900" height="600"></canvas>
+        <div id="status" class="status">Waiting to Connect...</div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById("whiteboard");
+        const ctx = canvas.getContext("2d");
+        const colorPicker = document.getElementById("color-picker");
+        const statusEl = document.getElementById("status");
+
+        let isDrawing = false;
+        let currentX = 0;
+        let currentY = 0;
+        let ws;
+
+        function joinRoom() {
+            const roomName = document.getElementById("room-input").value.trim();
+            if (!roomName) {
+                alert("Room name is required!");
+                return;
+            }
+
+            document.getElementById("current-room-name").innerText = roomName;
+            document.getElementById("login-form").style.display = "none";
+            document.getElementById("canvas-interface").style.display = "block";
+            // Reposition flex layout for the canvas mode
+            document.body.style.justifyContent = "flex-start";
+
+            // Clear Canvas Data visually when joining a new room locally
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // WebSocket Setup
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws?room=${encodeURIComponent(roomName)}`;
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                statusEl.innerText = "🟢 Connected";
+                statusEl.style.background = "#28a745";
+            };
+
+            ws.onclose = () => {
+                statusEl.innerText = "🔴 Disconnected";
+                statusEl.style.background = "#dc3545";
+            };
+
+            ws.onmessage = (event) => {
+                const msgs = event.data.split('\n');
+                msgs.forEach(msg => {
+                    if(!msg) return;
+                    const data = JSON.parse(msg);
+                    
+                    if (data.type === "init") {
+                        // Load historic drawing coordinates when launching!
+                        data.data.forEach(action => {
+                            if (action.type === "draw") drawLine(action.x0, action.y0, action.x1, action.y1, action.color, false);
+                        });
+                    } else if (data.type === "draw") {
+                        drawLine(data.x0, data.y0, data.x1, data.y1, data.color, false);
+                    } else if (data.type === "clear") {
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    }
+                });
+            };
+        }
+
+        function leaveRoom() {
+            if (ws) ws.close(); // Server drops us smoothly and closes channel
+            document.getElementById("login-form").style.display = "block";
+            document.getElementById("canvas-interface").style.display = "none";
+            // Return to vertical centering layout
+            document.body.style.justifyContent = "center";
+            document.getElementById("room-input").value = "";
+        }
+
+        // Drawing Mechanics
+        function drawLine(x0, y0, x1, y1, color, emit) {
+            ctx.beginPath();
+            ctx.moveTo(x0, y0);
+            ctx.lineTo(x1, y1);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.lineCap = "round";
+            ctx.stroke();
+            ctx.closePath();
+
+            // If emit is false (getting payload from server broadcast), don't loop it back to the server
+            if (!emit || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            // Broadcast to Server Hub efficiently
+            ws.send(JSON.stringify({
+                type: "draw",
+                x0: x0, y0: y0, x1: x1, y1: y1,
+                color: color
+            }));
+        }
+
+        function onMouseDown(e) {
+            isDrawing = true;
+            const rect = canvas.getBoundingClientRect();
+            currentX = e.clientX - rect.left;
+            currentY = e.clientY - rect.top;
+        }
+
+        function onMouseUp(e) {
+            if (!isDrawing) return;
+            isDrawing = false;
+            const rect = canvas.getBoundingClientRect();
+            drawLine(currentX, currentY, e.clientX - rect.left, e.clientY - rect.top, colorPicker.value, true);
+        }
+
+        function onMouseMove(e) {
+            if (!isDrawing) return;
+            const rect = canvas.getBoundingClientRect();
+            const newX = e.clientX - rect.left;
+            const newY = e.clientY - rect.top;
+            
+            drawLine(currentX, currentY, newX, newY, colorPicker.value, true);
+            currentX = newX;
+            currentY = newY;
+        }
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "clear" }));
+            }
+        }
+
+        // Mouse Events
+        canvas.addEventListener("mousedown", onMouseDown, false);
+        canvas.addEventListener("mouseup", onMouseUp, false);
+        canvas.addEventListener("mouseout", onMouseUp, false);
+        canvas.addEventListener("mousemove", onMouseMove, false);
+    </script>
+</body>
+</html>
